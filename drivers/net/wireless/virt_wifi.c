@@ -12,6 +12,7 @@
 #include <net/cfg80211.h>
 #include <net/rtnetlink.h>
 #include <linux/etherdevice.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 
 static struct wiphy *common_wiphy;
@@ -168,11 +169,11 @@ static void virt_wifi_scan_result(struct work_struct *work)
 			     scan_result.work);
 	struct wiphy *wiphy = priv_to_wiphy(priv);
 	struct cfg80211_scan_info scan_info = { .aborted = false };
+	u64 tsf = div_u64(ktime_get_boottime_ns(), 1000);
 
 	informed_bss = cfg80211_inform_bss(wiphy, &channel_5ghz,
 					   CFG80211_BSS_FTYPE_PRESP,
-					   fake_router_bssid,
-					   ktime_get_boottime_ns(),
+					   fake_router_bssid, tsf,
 					   WLAN_CAPABILITY_ESS, 0,
 					   (void *)&ssid, sizeof(ssid),
 					   DBM_TO_MBM(-50), GFP_KERNEL);
@@ -436,10 +437,18 @@ static int virt_wifi_net_device_stop(struct net_device *dev)
 	return 0;
 }
 
+static int virt_wifi_net_device_get_iflink(const struct net_device *dev)
+{
+	struct virt_wifi_netdev_priv *priv = netdev_priv(dev);
+
+	return priv->lowerdev->ifindex;
+}
+
 static const struct net_device_ops virt_wifi_ops = {
 	.ndo_start_xmit = virt_wifi_start_xmit,
-	.ndo_open = virt_wifi_net_device_open,
-	.ndo_stop = virt_wifi_net_device_stop,
+	.ndo_open	= virt_wifi_net_device_open,
+	.ndo_stop	= virt_wifi_net_device_stop,
+	.ndo_get_iflink = virt_wifi_net_device_get_iflink,
 };
 
 /* Invoked as part of rtnl lock release. */
@@ -450,7 +459,6 @@ static void virt_wifi_net_device_destructor(struct net_device *dev)
 	 */
 	kfree(dev->ieee80211_ptr);
 	dev->ieee80211_ptr = NULL;
-	free_netdev(dev);
 }
 
 /* No lock interaction. */
@@ -458,7 +466,7 @@ static void virt_wifi_setup(struct net_device *dev)
 {
 	ether_setup(dev);
 	dev->netdev_ops = &virt_wifi_ops;
-	dev->priv_destructor = virt_wifi_net_device_destructor;
+	dev->needs_free_netdev  = true;
 }
 
 /* Called in a RCU read critical section from netif_receive_skb */
@@ -544,6 +552,7 @@ static int virt_wifi_newlink(struct net *src_net, struct net_device *dev,
 		goto unregister_netdev;
 	}
 
+	dev->priv_destructor = virt_wifi_net_device_destructor;
 	priv->being_deleted = false;
 	priv->is_connected = false;
 	priv->is_up = false;

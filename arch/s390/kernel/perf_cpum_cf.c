@@ -199,7 +199,7 @@ static const int cpumf_generic_events_user[] = {
 	[PERF_COUNT_HW_BUS_CYCLES]	    = -1,
 };
 
-static int __hw_perf_event_init(struct perf_event *event)
+static int __hw_perf_event_init(struct perf_event *event, unsigned int type)
 {
 	struct perf_event_attr *attr = &event->attr;
 	struct hw_perf_event *hwc = &event->hw;
@@ -207,7 +207,7 @@ static int __hw_perf_event_init(struct perf_event *event)
 	int err = 0;
 	u64 ev;
 
-	switch (attr->type) {
+	switch (type) {
 	case PERF_TYPE_RAW:
 		/* Raw events are used to access counters directly,
 		 * hence do not permit excludes */
@@ -230,9 +230,7 @@ static int __hw_perf_event_init(struct perf_event *event)
 		/* No support for kernel space counters only */
 		} else if (!attr->exclude_kernel && attr->exclude_user) {
 			return -EOPNOTSUPP;
-
-		/* Count user and kernel space */
-		} else {
+		} else {	/* Count user and kernel space */
 			if (ev >= ARRAY_SIZE(cpumf_generic_events_basic))
 				return -EOPNOTSUPP;
 			ev = cpumf_generic_events_basic[ev];
@@ -269,7 +267,7 @@ static int __hw_perf_event_init(struct perf_event *event)
 	case CPUMF_CTR_SET_MAX:
 		/* The counter could not be associated to a counter set */
 		return -EINVAL;
-	};
+	}
 
 	/* Initialize for using the CPU-measurement counter facility */
 	if (!atomic_inc_not_zero(&num_events)) {
@@ -294,17 +292,16 @@ static int __hw_perf_event_init(struct perf_event *event)
 
 static int cpumf_pmu_event_init(struct perf_event *event)
 {
+	unsigned int type = event->attr.type;
 	int err;
 
-	switch (event->attr.type) {
-	case PERF_TYPE_HARDWARE:
-	case PERF_TYPE_HW_CACHE:
-	case PERF_TYPE_RAW:
-		err = __hw_perf_event_init(event);
-		break;
-	default:
+	if (type == PERF_TYPE_HARDWARE || type == PERF_TYPE_RAW)
+		err = __hw_perf_event_init(event, type);
+	else if (event->pmu->type == type)
+		/* Registered as unknown PMU */
+		err = __hw_perf_event_init(event, PERF_TYPE_RAW);
+	else
 		return -ENOENT;
-	}
 
 	if (unlikely(err) && event->destroy)
 		event->destroy(event);
@@ -403,12 +400,12 @@ static void cpumf_pmu_stop(struct perf_event *event, int flags)
 		 */
 		if (!atomic_dec_return(&cpuhw->ctr_set[hwc->config_base]))
 			ctr_set_stop(&cpuhw->state, hwc->config_base);
-		event->hw.state |= PERF_HES_STOPPED;
+		hwc->state |= PERF_HES_STOPPED;
 	}
 
 	if ((flags & PERF_EF_UPDATE) && !(hwc->state & PERF_HES_UPTODATE)) {
 		hw_perf_event_update(event);
-		event->hw.state |= PERF_HES_UPTODATE;
+		hwc->state |= PERF_HES_UPTODATE;
 	}
 }
 
@@ -431,8 +428,6 @@ static int cpumf_pmu_add(struct perf_event *event, int flags)
 	if (flags & PERF_EF_START)
 		cpumf_pmu_start(event, PERF_EF_RELOAD);
 
-	perf_event_update_userpage(event);
-
 	return 0;
 }
 
@@ -452,8 +447,6 @@ static void cpumf_pmu_del(struct perf_event *event, int flags)
 	 */
 	if (!atomic_read(&cpuhw->ctr_set[event->hw.config_base]))
 		ctr_set_disable(&cpuhw->state, event->hw.config_base);
-
-	perf_event_update_userpage(event);
 }
 
 /*
@@ -553,7 +546,7 @@ static int __init cpumf_pmu_init(void)
 		return -ENODEV;
 
 	cpumf_pmu.attr_groups = cpumf_cf_event_group();
-	rc = perf_pmu_register(&cpumf_pmu, "cpum_cf", PERF_TYPE_RAW);
+	rc = perf_pmu_register(&cpumf_pmu, "cpum_cf", -1);
 	if (rc)
 		pr_err("Registering the cpum_cf PMU failed with rc=%i\n", rc);
 	return rc;
